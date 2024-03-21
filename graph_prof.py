@@ -80,9 +80,17 @@ class GraphProfiler(fx.Interpreter):
 
 
         # you can start measuring the run-time of a node here
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+
         result = super().run_node(n)
+
         # you can end measuring the run-time of a node here
         # HINT: Use torch.cuda.Events for doing time measurements of operations.
+        end.record()
+        torch.cuda.synchronize()
+        print(n, start.elapsed_time(end))
 
 
         # If you are in the forward pass region and if the current node 'n' is
