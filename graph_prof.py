@@ -171,13 +171,13 @@ class GraphProfiler(fx.Interpreter):
 
     def _handle_forward_node(self, n: fx.Node):
     # Check if any input tensor is last used here and swap it out
-    for input_name in n.all_input_names:
-        if input_name in self.last_uses and self.last_uses[input_name] == n.name:
-            tensor = self.fetch_attr(input_name)
-            if tensor.is_cuda:
-                # Move the tensor to CPU and record this action
-                self.swapped_tensors[input_name] = tensor.cpu()
-                print(f"Swapped out tensor '{input_name}' to CPU")
+        for input_name in n.all_input_names:
+            if input_name in self.last_uses and self.last_uses[input_name] == n.name:
+                tensor = self.fetch_attr(input_name)
+                if tensor.is_cuda:
+                    # Move the tensor to CPU and record this action
+                    self.swapped_tensors[input_name] = tensor.cpu()
+                    print(f"Swapped out tensor '{input_name}' to CPU")
 
     def _handle_backward_node(self, n: fx.Node):
         # Check if this node uses any tensor that was swapped out
