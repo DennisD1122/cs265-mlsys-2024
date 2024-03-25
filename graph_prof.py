@@ -21,7 +21,6 @@ class OP(str, Enum):
 class GraphProfiler(fx.Interpreter):
     def __init__(self, module: fx.GraphModule, garbage_collect_values: bool = True):
         super().__init__(module, garbage_collect_values)
-
         # You should perform the static analysis of the graph here. In
         # particular you might want to find the intermediate
         # nodes/activations/feature_maps in the graph that will be defined as
@@ -54,14 +53,76 @@ class GraphProfiler(fx.Interpreter):
         # backward pass. 
 
         # Printing the input nodes, node users and node names.
+        self.intermediate_nodes = {}
+        self.backward_boundary_node = None
+        self.forward_boundary_node = None
+        self._analyze_graph()
 
+        print(self.intermediate_nodes)
+        print(len(self.intermediate_nodes))
+
+        self.total_rumtime_sec : List[float] = []
+        self.runtimes_sec : Dict[torch.fx.Node, List[float]] = {} 
+
+        # for node in self.module.graph.nodes:
+        #     print ("Node name: ", node.name)
+        #     print ("Node type: ", node.op)
+        #     print ("Node target: ", node.target)
+        #     print ("Input to this node", node.all_input_nodes)
+        #     print ("Users of this node: ", node.users)
+
+    def _analyze_graph(self):
+        seen_backward = False
+        tensor_usage = {}
+        # Iterate through nodes to find forward and backward boundary nodes
         for node in self.module.graph.nodes:
-            print ("Node name: ", node.name)
-            print ("Node type: ", node.op)
-            print ("Node target: ", node.target)
-            print ("Input to this node", node.all_input_nodes)
-            print ("Users of this node: ", node.users)
+            if node.op == "call_function" and 'sep.default' in str(node.target):
+                self.forward_boundary_node = node
+            elif node.op == "call_function" and 'sep_backward.default' in str(node.target):
+                self.backward_boundary_node = node
+                seen_backward = True
+                break
+                # Initializing tracking for all nodes before backward boundary as potential intermediates
+        
+        for node in self.module.graph.nodes:
+            if node == self.backward_boundary_node:
+                break
+            if node.op not in [OP.PLACEHOLDER, OP.GET_ATTR, OP.OUTPUT]:
+                tensor_usage[node] = {
+                    'last_fw_use': None,
+                    'first_bw_use': None,
+                }
 
+        # Track usage in the forward pass
+        for node in self.module.graph.nodes:
+            if node == self.forward_boundary_node:
+                break
+            for user in node.users:
+                if user in tensor_usage:
+                    tensor_usage[user]['last_fw_use'] = node
+
+        # Track usage in the backward pass, starting from the backward boundary
+        if seen_backward:
+            for node in list(reversed(list(self.module.graph.nodes))):
+                if node.op == OP.OUTPUT:
+                    continue
+                for input_node in node.all_input_nodes:
+                    if input_node in tensor_usage and tensor_usage[input_node]['first_bw_use'] is None:
+                        tensor_usage[input_node]['first_bw_use'] = node
+                if node == self.backward_boundary_node:
+                    break
+
+        for node in tensor_usage:
+
+            if tensor_usage[node]['last_fw_use'] is not None and tensor_usage[node]['first_bw_use'] is not None:
+
+                self.intermediate_nodes[node.name] = {
+                    'last_fw_uses': tensor_usage[node]['last_fw_use'],
+                    'fist_bw_uses': tensor_usage[node]['first_bw_use']
+                }
+    
+
+    
     def run(
         self,
         *args,
@@ -77,10 +138,27 @@ class GraphProfiler(fx.Interpreter):
         # If you are in the backward pass region and one of the feature maps 'x'
         # was swapped out, and if node 'n' will use this feature map 'x' as one
         # of its inputs then you swap 'x' back to the GPU memory here.
-
+        
 
         # you can start measuring the run-time of a node here
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+        start_memory = torch.cuda.memory_allocated()
+
+        # Run the node
         result = super().run_node(n)
+
+        # End timing and memory tracking
+        end_event.record()
+        torch.cuda.synchronize()  # Ensure timing is accurate
+        end_memory = torch.cuda.memory_allocated()
+
+        # Record compute time and memory usage
+        self.compute_times[n.name] = start_event.elapsed_time(end_event)
+        self.memory_usages[n.name] = end_memory - start_memory
+
+        
         # you can end measuring the run-time of a node here
         # HINT: Use torch.cuda.Events for doing time measurements of operations.
 
@@ -90,3 +168,22 @@ class GraphProfiler(fx.Interpreter):
         # the CPU memory here.
 
         return result
+
+    def _handle_forward_node(self, n: fx.Node):
+    # Check if any input tensor is last used here and swap it out
+    for input_name in n.all_input_names:
+        if input_name in self.last_uses and self.last_uses[input_name] == n.name:
+            tensor = self.fetch_attr(input_name)
+            if tensor.is_cuda:
+                # Move the tensor to CPU and record this action
+                self.swapped_tensors[input_name] = tensor.cpu()
+                print(f"Swapped out tensor '{input_name}' to CPU")
+
+    def _handle_backward_node(self, n: fx.Node):
+        # Check if this node uses any tensor that was swapped out
+        for input_name in n.all_input_names:
+            if input_name in self.swapped_tensors:
+                # Move the tensor back to GPU
+                tensor = self.swapped_tensors[input_name].cuda()
+                self.swapped_tensors.pop(input_name)  # Remove from swapped list
+                print(f"Swapped in tensor '{input_name}' to GPU")
