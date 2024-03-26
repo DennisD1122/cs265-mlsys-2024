@@ -54,80 +54,106 @@ class GraphProfiler(fx.Interpreter):
 
         # Printing the input nodes, node users and node names.
         self.intermediate_nodes = {}
-        self.backward_boundary_node = None
-        self.forward_boundary_node = None
         self._analyze_graph()
+        self.in_backward_pass = False
         
-        print(self.intermediate_nodes)
-        print(len(self.intermediate_nodes))
+        # Fix:
+        
+        # for node in self.intermediate_nodes:
+        #     print("Node name:", node)
+        #     print(self.intermediate_nodes[node])
+        # print(len(self.intermediate_nodes))
 
-        self.total_rumtime_sec : List[float] = []
-        self.runtimes_sec : Dict[torch.fx.Node, List[float]] = {} 
-        self.compute_times = {}
-        self.memory_usages = {}
-    
+        self.compute_times = []
+        self.memory_usages = []
+        self.swap_time = []
+
         # for node in self.module.graph.nodes:
-        #     print ("Node name: ", node.name)
-        #     print ("Node type: ", node.op)
-        #     print ("Node target: ", node.target)
-        #     print ("Input to this node", node.all_input_nodes)
-        #     print ("Users of this node: ", node.users)
+
+        
+        # print ("Node name: ", self.backward_boundary_node.name)
+        # print ("Node type: ", self.backward_boundary_node.op)
+        # print ("Node target: ", self.backward_boundary_node.target)
+        # print ("Input to this node", self.backward_boundary_node.all_input_nodes)
+        # print ("Users of this node: ", self.backward_boundary_node.users)
+
 
     def _analyze_graph(self):
         seen_backward = False
-        tensor_usage = {}
+        forward_nodes = set()
+        node_usage = {}
         # Iterate through nodes to find forward and backward boundary nodes
         for node in self.module.graph.nodes:
-            if node.op == "call_function" and 'sep.default' in str(node.target):
-                self.forward_boundary_node = node
-            elif node.op == "call_function" and 'sep_backward.default' in str(node.target):
-                self.backward_boundary_node = node
+            if node.op == "call_function" and node.name == 'sep':
+                seen_backward = None
+            elif node.op == "call_function" and node.name == 'sep_backward':
                 seen_backward = True
                 break
-                # Initializing tracking for all nodes before backward boundary as potential intermediates
-        
-        if self.forward_boundary_node is not None and self.backward_boundary_node is not None:
 
-            for node in self.module.graph.nodes:
-                if node == self.backward_boundary_node:
-                    break;
-                if node.op not in [OP.PLACEHOLDER, OP.GET_ATTR, OP.OUTPUT]:
-                    tensor_usage[node.name] = {
-                        'first_fw_access': None,
-                        'last_fw_access': None,
-                        'first_bw_access': None,
-                        'last_bw_access': None
-                    }
+        for node in self.module.graph.nodes:
+            if node.op == "call_function" and node.name == 'sep':
+                break;
+            forward_nodes.add(node);
 
-            for node in self.module.graph.nodes:
+        seen_backward = False
+        for node in self.module.graph.nodes:
 
-                if node == self.forward_boundary_node:
-                    break
+            if node.op == "call_function" and node.name == 'sep_backward':
+                seen_backward = True
 
-                for user in node.users:
-                    if user.name in tensor_usage:
-                        if tensor_usage[user.name]['first_fw_access'] is None:
-                            tensor_usage[user.name]['first_fw_access'] = node.name
-                        tensor_usage[user.name]['last_fw_access'] = node.name
             if seen_backward:
-                for node in reversed(list(tensor_usage)):
-                    if node.op == OP.OUTPUT:
-                        continue
-                    for input_node in node.all_input_nodes:
-                        if input_node.name in tensor_usage:
-                            if tensor_usage[input_node.name]['last_bw_access'] is None:
-                                tensor_usage[input_node.name]['last_bw_access'] = node.name
-                            tensor_usage[input_node.name]['first_bw_access'] = node.name
-
-                    if node == self.backward_boundary_node:
-                        break
-
-            # From tensor_usage get last_fw_uses and first_bw_uses
-
+                for input_node in node.all_input_nodes:
+                    if input_node in forward_nodes and input_node.op != "placeholder":
+                        node_usage[input_node.name] = {
+                            'first_fw_access': None,
+                            'last_fw_access': None,
+                            'first_bw_access': None,
+                            'last_bw_access': None
+                        }
         
-                    
+        seen_backward = False
+        # for intermediate_node in node_usage.keys():
             
-    
+        for node in self.module.graph.nodes:
+            if seen_backward == False:
+                for input_node in node.all_input_nodes:
+                    if input_node.name in node_usage:
+                        if node_usage[input_node.name]['first_fw_access'] is None:
+                            node_usage[input_node.name]['first_fw_access'] = node.name
+                        node_usage[input_node.name]['last_fw_access'] = node.name
+            if node.op == "call_function" and node.name == 'sep':
+                seen_backward = None
+            if node.op == "call_function" and node.name == 'sep_backward':
+                seen_backward = True
+            if seen_backward:
+                for input_node in node.all_input_nodes:
+                    if input_node.name in node_usage:
+                        if node_usage[input_node.name]['first_bw_access'] is None:
+                            node_usage[input_node.name]['first_bw_access'] = node.name
+                        node_usage[input_node.name]['last_bw_access'] = node.name
+                        
+        # Fix
+        
+        # for node in node_usage:
+        #     print("Node name: ", node)
+        #     print(node_usage[node])
+            
+
+        # From tensor_usage get last_fw_uses and first_bw_uses
+
+        for node in self.module.graph.nodes:
+            fw_uses = set()
+            bw_uses = set()
+            for access in node_usage.keys():
+                if node.name == node_usage[access]['last_fw_access']:
+                    fw_uses.add(access)
+                if node.name == node_usage[access]['first_bw_access']:
+                    bw_uses.add(access)
+
+                if len(fw_uses) != 0 or len(bw_uses) != 0:
+                    self.intermediate_nodes[node.name] = {'last_fw_uses': fw_uses,
+                                                'first_bw_uses': bw_uses}
+
 
     
     def run(
@@ -146,10 +172,26 @@ class GraphProfiler(fx.Interpreter):
         # was swapped out, and if node 'n' will use this feature map 'x' as one
         # of its inputs then you swap 'x' back to the GPU memory here.
 
-        # self.env[n] = tensor
-        
-        
-        # { node : (last_fw_uses){ (node -> tensor  )  } }
+        # self.env[n] : tensor
+        if n.op == "call_function" and n.name == 'sep_backward':
+            self.in_backward_pass = True
+
+        if self.in_backward_pass:
+            for input_name in n.all_input_nodes:
+                if self.intermediate_nodes.get(input_name.name):
+                   if n.name in self.intermediate_nodes[input_name.name]['first_bw_uses']:
+                       # swap in/out
+                       swap_start = torch.cuda.Event(enable_timing=True)
+                       swap_end = torch.cuda.Event(enable_timing=True)
+                       swap_start.record()
+                       
+                       temp = self.env.get(n)
+                       if torch.is_tensor(temp):
+                           self.env[n] = temp.device(torch.device('cuda:0'))
+                           del temp
+                       swap_end.record()
+                       torch.cuda.synchronize()
+                       self.swap_time.append({"node": n.name, "transfer": "CPU -> GPU", "time" : swap_start.elapsed_time(swap_end)})
 
         # you can start measuring the run-time of a node here
         start_event = torch.cuda.Event(enable_timing=True)
@@ -166,8 +208,8 @@ class GraphProfiler(fx.Interpreter):
         end_memory = torch.cuda.memory_allocated()
 
         # Record compute time and memory usage
-        self.compute_times[n.name] = start_event.elapsed_time(end_event)
-        self.memory_usages[n.name] = end_memory - start_memory
+        self.compute_times.append({"node": n.name, "time" : start_event.elapsed_time(end_event)})
+        self.memory_usages.append({"node": n.name, "time" : end_memory})
 
         
         # you can end measuring the run-time of a node here
@@ -177,5 +219,25 @@ class GraphProfiler(fx.Interpreter):
         # If you are in the forward pass region and if the current node 'n' is
         # the last user of a feature map 'x', then it should be swapped out to
         # the CPU memory here.
+        
+        if not self.in_backward_pass:
+            for user in n.users:
+                if self.intermediate_nodes.get(user.name):
+                    if n.name in self.intermediate_nodes[user.name]['last_fw_uses']:
+                        
+                        swap_start = torch.cuda.Event(enable_timing=True)
+                        swap_end = torch.cuda.Event(enable_timing=True)
+                        swap_start.record()
+                        
+                        temp = self.env.get(n)
+                        if torch.is_tensor(temp):
+                            self.env[n] = temp.device(torch.device('cpu'))
+                            del temp
 
+                        swap_end.record()
+                        torch.cuda.synchronize()
+                        self.swap_time.append({"node": n.name, "transfer": "GPU -> CPU", "time": swap_start.elapsed_time(swap_end)})
+        
+        
+         
         return result
