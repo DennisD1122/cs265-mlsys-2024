@@ -6,7 +6,7 @@ import torch.multiprocessing as mp
 import torch
 import torch.nn as nn
 from graph_tracer import compile, SEPFunction
-from graph_prof import GraphProfiler
+from graph_prof import GraphProfiler, OP
 import torch.fx as fx
 
 # This is the dummy model that is for use in starter code. But we will
@@ -67,6 +67,13 @@ def train_step(
 
 def graph_transformation(gm: fx.GraphModule, args: Any) -> fx.GraphModule:
     # print(gm.graph)
+
+    for node in gm.graph.nodes:
+        if len(node.users)==0 and node.op not in [OP.PLACEHOLDER, OP.OUTPUT]:
+            gm.graph.erase_node(node)
+    gm.graph.eliminate_dead_code()
+    gm.graph.lint()
+    gm.recompile()
 
     graph_profiler = GraphProfiler(gm)
     with torch.no_grad():

@@ -6,6 +6,8 @@ import torch
 import torch.optim as optim
 import importlib
 from graph_tracer import SEPFunction, compile
+from starter_code import graph_transformation
+import sys
 
 model_names: List[str] = [
     "torchbenchmark.models.hf_Bert.Model",
@@ -20,9 +22,9 @@ actual_model_names: List[str] = [
 ]
 
 model_batch_sizes: Dict[str, int] = {
-    "torchbenchmark.models.hf_Bert.Model": 32,
+    "torchbenchmark.models.hf_Bert.Model": 8, # 32,
     "torchbenchmark.models.resnet50.Model": 256,
-    "torchbenchmark.models.resnet152.Model": 64,
+    "torchbenchmark.models.resnet152.Model": 8, # 64,
 }
 
 class Experiment:
@@ -77,9 +79,11 @@ class Experiment:
 
 if __name__ == "__main__":
 
-    exp = Experiment(model_names[0], model_batch_sizes[model_names[0]])
+    model_idx = int(sys.argv[1])
+    exp = Experiment(model_names[model_idx], model_batch_sizes[model_names[model_idx]])
     # exp.run()
-    compiled_fn = compile(exp.train_step, lambda x, y : x)
+    # compiled_fn = compile(exp.train_step, lambda x, y : x)
+    compiled_fn = compile(exp.train_step, graph_transformation)
     compiled_fn(exp.model, exp.optimizer, exp.example_inputs)
 
 
