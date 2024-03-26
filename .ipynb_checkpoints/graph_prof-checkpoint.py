@@ -6,7 +6,6 @@ from typing import Dict, Any
 
 import json
 import gc
-# from Pytorch_Memory_Utils.gpu_mem_track import MemTracker
 
 
 class OP(str, Enum):
@@ -165,20 +164,19 @@ class GraphProfiler(fx.Interpreter):
         # Keeps track of state inside `run_node()`
         self.is_forward_pass = True
 
-        # self.gpu_tracker = MemTracker()
-
     def run(
         self,
         *args,
         initial_env: Dict[fx.Node, Any] | None = None,
         enable_io_processing: bool = True
     ) -> torch.Any:
-        # self.gpu_tracker.track()
         ret = super().run(
             *args, initial_env=initial_env, enable_io_processing=enable_io_processing
         )
         with open('stats.json', 'w') as f:
             json.dump(self.stats, f)
+        peak_mem = max(v['memory'] for v in self.stats.values())
+        print(peak_mem)
         return ret
 
     def run_node(self, n: fx.Node) -> Any:
@@ -190,15 +188,12 @@ class GraphProfiler(fx.Interpreter):
         # If you are in the backward pass region and one of the feature maps 'x'
         # was swapped out, and if node 'n' will use this feature map 'x' as one
         # of its inputs then you swap 'x' back to the GPU memory here.
-        # if not self.is_forward_pass and n in self.backward_first_users:
-        #     for x in self.backward_first_users[n]:
-        #         self.env[x] = self.env[x].cuda()
+        if not self.is_forward_pass and n in self.backward_first_users:
+            for x in self.backward_first_users[n]:
+                self.env[x] = self.env[x].cuda()
 
         # Prepare to measure GPU memory usage
-        # gc.collect()
-        # torch.cuda.empty_cache()
-        # torch.cuda.reset_peak_memory_stats(device=None)
-        # start_mem = torch.cuda.max_memory_allocated()
+        torch.cuda.reset_peak_memory_stats(device=None)
         
         # you can start measuring the run-time of a node here
         start_time = torch.cuda.Event(enable_timing=True)
@@ -211,30 +206,27 @@ class GraphProfiler(fx.Interpreter):
         # HINT: Use torch.cuda.Events for doing time measurements of operations.
         end_time.record()
         torch.cuda.synchronize()
-
-        # end_mem = torch.cuda.max_memory_allocated()
         
         # Info for analysis
         self.stats[n.name] = {
             'type': self.node_types[n],
             'time': start_time.elapsed_time(end_time),
-            'memory': torch.cuda.memory_allocated() # end_mem - start_mem
+            'memory': torch.cuda.max_memory_allocated()
         }
-        if self.node_types[n] == 'activations':
-            self.stats[n]['activation_unused_range'] = self.activation_unused_range[n]
+        if self.node_types[n] == 'activation':
+            activation_unused_range = [node.name for node in self.activation_unused_range[n]]
+            self.stats[n.name]['activation_unused_range'] = activation_unused_range
 
         # If you are in the forward pass region and if the current node 'n' is
         # the last user of a feature map 'x', then it should be swapped out to
         # the CPU memory here.
-        # if self.is_forward_pass and n in self.forward_last_users:
-        #     for x in self.forward_last_users[n]:
-        #         if x == n:
-        #             # `x` is the node currently being run
-        #             result = result.cpu()
-        #         else:
-        #             # `x` is a previously-run node
-        #             self.env[x] = self.env[x].cpu()
-
-        # self.gpu_tracker.track()
+        if self.is_forward_pass and n in self.forward_last_users:
+            for x in self.forward_last_users[n]:
+                if x == n:
+                    # `x` is the node currently being run
+                    result = result.cpu()
+                else:
+                    # `x` is a previously-run node
+                    self.env[x] = self.env[x].cpu()
         
         return result
