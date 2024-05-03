@@ -61,6 +61,10 @@ class NodeInfo:
     last_forward_uses: List[fx.Node] = field(default_factory=list)
     first_back_uses: List[fx.Node] = field(default_factory=list)
     # You can add more attributes to this class for applying the recomputation algorithm
+    recomp_srcs: List[fx.Node] = field(default_factory=list)
+    recomp_time: float = 0.0
+    total_recomp_time: float = 0.0
+    recompute_ratio: float = 0.0
 
 
 # This is an example graph_profiler that extends the fx.Interpreter class, it
@@ -82,6 +86,8 @@ class GraphProfiler(fx.Interpreter):
         self.backward_start: fx.Node
         self.swapped_memory: int = 0
         self.param_and_opt_state_memory: int
+        self.candidates: List[fx.Node] = []
+        self.recomps: List[fx.Node] = []
 
         rank = 0
         for node in self.module.graph.nodes:
@@ -361,6 +367,67 @@ class GraphProfiler(fx.Interpreter):
                 val_list.append("")
             node_summaries.append(val_list)
         print(tabulate.tabulate(node_summaries, headers=headers))
+
+    def recomputation_policy(self, mem_limit: int, max_peak_memory: int):
+        mem_consumption = max_peak_memory
+        self.candidates_initialization()
+        while self.candidates:
+            cand = self.max_candidate()
+            self.recomps.append(cand)
+            self.candidates.remove(cand)
+            recomp_cnt = self.update_recomps(cand)
+            self.update_candidates(cand, recomp_cnt)
+            mem_consumption -= self.node_info[cand].memory_size
+            if mem_consumption - mem_limit <= 0:
+                break
+
+    def candidates_initialization(self) -> List[fx.Node]:
+        for cand in self.intermediate_nodes:
+            cand_info = self.node_info[cand]
+            cand_info.recomp_srcs = cand.all_input_nodes
+            cand_info.recomp_time = cand_info.run_time
+            cand_info.total_recomp_time = cand_info.recomp_time
+            cand_info.recompute_ratio = cand_info.memory_size / cand_info.total_recomp_time
+            self.candidates.append(cand)
+    
+    def max_candidate(self) -> fx.Node:
+        max_candidate = None
+        for cand in self.candidates:
+            if (
+                max_candidate is None or
+                self.node_info[max_candidate].recompute_ratio < 
+                self.node_info[cand].recompute_ratio
+            ):
+                max_candidate = cand
+        return max_candidate
+    
+    def update_recomps(self, cand: fx.Node) -> int:
+        recomp_cnt = 1
+        cand_info = self.node_info[cand]
+        for rp in self.recomps:
+            rp_info = self.node_info[rp]
+            if cand in rp_info.recomp_srcs:
+                rp_info.recomp_srcs.remove(cand)
+                rp_info.recomp_srcs.extend(cand_info.recomp_srcs)
+                rp_info.recomp_time += cand_info.recomp_time
+                recomp_cnt += 1
+        return recomp_cnt
+
+    def update_candidates(self, t: fx.Node, recomp_cnt: int) -> None:
+        t_info = self.node_info[t]
+        for cand in self.candidates:
+            cand_info = self.node_info[cand]
+            if t in cand_info.recomp_srcs:
+                cand_info.recomp_srcs.remove(t)
+                cand_info.recomp_srcs.extend(t_info.recomp_srcs)
+                cand_info.recomp_time += t_info.recomp_time
+                cand_info.total_recomp_time = cand_info.recomp_time
+                for rp in self.recomps:
+                    if cand in self.node_info[rp].recomp_srcs:
+                        cand_info.total_recomp_time += cand_info.recomp_time
+            if cand in t_info.recomp_srcs:
+                cand_info.total_recomp_time += recomp_cnt * cand_info.recomp_time
+            cand_info.recompute_ratio = cand_info.memory_size / cand_info.total_recomp_time
 
 
 if __name__ == "__main__":
