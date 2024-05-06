@@ -92,7 +92,9 @@ class Experiment:
         graph_profiler = GraphProfiler(gm)
 
         if use_activation_checkpointing:
-            activation_checkpointing(graph_profiler)
+            gm = activation_checkpointing(graph_profiler)
+            print(gm.graph)
+            graph_profiler = GraphProfiler(gm)
 
         with torch.no_grad():
             for _ in range(warm_up_iters):

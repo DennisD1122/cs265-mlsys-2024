@@ -55,7 +55,7 @@ def get_name_to_node_map(gm: fx.GraphModule) -> Dict[str, fx.Node]:
     return name_to_node
 
 
-def activation_checkpointing(graph_profiler: GraphProfiler) -> None:
+def activation_checkpointing(graph_profiler: GraphProfiler) -> fx.GraphModule:
     # NOTE: You need to create the function for your project and call it inside
     # the graph_transformation function after performing graph profiling.
 
@@ -124,6 +124,7 @@ def activation_checkpointing(graph_profiler: GraphProfiler) -> None:
 
     graph_profiler.module.graph.lint()
     graph_profiler.module.recompile()
+    return graph_profiler.module
 
 
 if __name__ == "__main__":
