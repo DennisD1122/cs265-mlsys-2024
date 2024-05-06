@@ -368,8 +368,9 @@ class GraphProfiler(fx.Interpreter):
             node_summaries.append(val_list)
         print(tabulate.tabulate(node_summaries, headers=headers))
 
-    def recomputation_policy(self, mem_limit: int, max_peak_memory: int):
-        mem_consumption = max_peak_memory
+    def recomputation_policy(self):
+        mem_limit = torch.cuda.get_device_properties(0).total_memory
+        mem_consumption = max(n_info.peak_total_mem for n_info in self.node_info.values())
         self.candidates_initialization()
         while self.candidates:
             cand = self.max_candidate()

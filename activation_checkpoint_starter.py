@@ -6,8 +6,6 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from torch._functorch.partitioners import _extract_graph_with_inputs_outputs
 from graph_tracer import SEPFunction
 
-from graph_prof import GraphProfiler
-
 
 # We define a custom function that takes in two weight matrices that require
 # gradients to be computed and an input data matrix. The function returns the
@@ -55,7 +53,7 @@ def get_name_to_node_map(gm: fx.GraphModule) -> Dict[str, fx.Node]:
     return name_to_node
 
 
-def activation_checkpointing(graph_profiler: GraphProfiler) -> None:
+def activation_checkpointing(gm: fx.GraphModule) -> fx.GraphModule:
     # NOTE: You need to create the function for your project and call it inside
     # the graph_transformation function after performing graph profiling.
 
@@ -76,54 +74,50 @@ def activation_checkpointing(graph_profiler: GraphProfiler) -> None:
     # intermediate nodes MUST be a subset of the placeholder nodes and the
     # intermediate nodes that are checkpointed.
 
-    graph_profiler.recomputation_policy()
-    name_to_node = get_name_to_node_map(graph_profiler.module)
+    name_to_node = get_name_to_node_map(gm)
+    first_back_access = name_to_node["t"]
+    node_to_recompute = [name_to_node["relu"]]
+    node_to_recompute_names = ["relu"]
+    nodes_required_to_recompute = [name_to_node["w1_1"], name_to_node["x_1"]]
 
-    for recomp_node in graph_profiler.recomps:
-        
-        recomp_node_info = graph_profiler.node_info[recomp_node]
-        first_back_access = recomp_node_info.first_back_access
-        node_to_recompute = [recomp_node]
-        node_to_recompute_names = [recomp_node.name]
-        nodes_required_to_recompute = recomp_node_info.recomp_srcs
+    # NOTE: we cannot directly use 'mm' to recompute 'relu' since 'mm' is not an
+    # intermediate node that is retained (checkpointed).
 
-        # NOTE: we cannot directly use 'mm' to recompute 'relu' since 'mm' is not an
-        # intermediate node that is retained (checkpointed).
+    # Obtain a sub-graph that recomputes the required nodes
+    recompute_subgraph = _extract_graph_with_inputs_outputs(
+        joint_graph=gm.graph,
+        inputs=nodes_required_to_recompute,
+        outputs=node_to_recompute,
+    )
+    print("Extracted recomputation sub-graph: ")
+    recompute_subgraph.print_tabular()
 
-        # Obtain a sub-graph that recomputes the required nodes
-        recompute_subgraph = _extract_graph_with_inputs_outputs(
-            joint_graph=graph_profiler.module.graph,
-            inputs=nodes_required_to_recompute,
-            outputs=node_to_recompute,
-        )
-        print("Extracted recomputation sub-graph: ")
-        recompute_subgraph.print_tabular()
+    # Insert the nodes of the new sub-graph in the old graph before the first
+    # backward access of the node to be recomputed.
+    with gm.graph.inserting_before(first_back_access):
+        for n in recompute_subgraph.nodes:
+            if n.op == "placeholder" or n.op == "output":
+                continue
+            # Copy the nodes of the new sub-graph to old graph and transform its
+            # inputs to match the old-graph inputs. The arg_transform function
+            # will pass the input arguments of the new node and will expect a
+            # mapping to the nodes of the old graph.
+            new_node = gm.graph.node_copy(
+                n, arg_transform=lambda arg: name_to_node[arg.name]
+            )
 
-        # Insert the nodes of the new sub-graph in the old graph before the first
-        # backward access of the node to be recomputed.
-        with graph_profiler.module.graph.inserting_before(first_back_access):
-            for n in recompute_subgraph.nodes:
-                if n.op == "placeholder" or n.op == "output":
-                    continue
-                # Copy the nodes of the new sub-graph to old graph and transform its
-                # inputs to match the old-graph inputs. The arg_transform function
-                # will pass the input arguments of the new node and will expect a
-                # mapping to the nodes of the old graph.
-                new_node = graph_profiler.module.graph.node_copy(
-                    n, arg_transform=lambda arg: name_to_node[arg.name]
+            if n.name in node_to_recompute_names:
+                old_node = name_to_node[n.name]
+                # Replace all the uses of the old node with new recomputation node
+                replace_subsequent_uses_of(
+                    gm.graph, old_node=old_node, new_node=new_node
                 )
+            # Add the new node to our name to node mapping
+            name_to_node[n.name] = new_node
 
-                if n.name in node_to_recompute_names:
-                    old_node = name_to_node[n.name]
-                    # Replace all the uses of the old node with new recomputation node
-                    replace_subsequent_uses_of(
-                        graph_profiler.module.graph, old_node=old_node, new_node=new_node
-                    )
-                # Add the new node to our name to node mapping
-                name_to_node[n.name] = new_node
-
-    graph_profiler.module.graph.lint()
-    graph_profiler.module.recompile()
+    gm.graph.lint()
+    gm.recompile()
+    return gm
 
 
 if __name__ == "__main__":

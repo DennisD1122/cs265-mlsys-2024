@@ -11,6 +11,8 @@ from graph_prof import GraphProfiler
 from graph_tracer import SEPFunction, compile
 import sys
 
+from activation_checkpoint import activation_checkpointing
+
 model_names: List[str] = [
     "torchbenchmark.models.hf_Bert.Model",
     "torchbenchmark.models.resnet18.Model",
@@ -89,6 +91,9 @@ class Experiment:
         warm_up_iters, profile_iters = 2, 3
         graph_profiler = GraphProfiler(gm)
 
+        if use_activation_checkpointing:
+            activation_checkpointing(graph_profiler)
+
         with torch.no_grad():
             for _ in range(warm_up_iters):
                 graph_profiler.run(*args)
@@ -107,7 +112,9 @@ class Experiment:
 
 
 if __name__ == "__main__":
-    model_idx = int(sys.argv[1])
+    global use_activation_checkpointing
+    use_activation_checkpointing = bool(int(sys.argv[1]))
+    model_idx = int(sys.argv[2])
     exp = Experiment(model_names[model_idx], model_batch_sizes[model_names[model_idx]])
     exp.init_opt_states()
     compiled_fn = compile(exp.train_step, exp.graph_transformation)
