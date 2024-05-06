@@ -9,6 +9,7 @@ from torchbenchmark.models import hf_Bert, resnet18, resnet50
 from torchbenchmark.util.model import BenchmarkModel
 from graph_prof import GraphProfiler
 from graph_tracer import SEPFunction, compile
+import sys
 
 model_names: List[str] = [
     "torchbenchmark.models.hf_Bert.Model",
@@ -106,7 +107,8 @@ class Experiment:
 
 
 if __name__ == "__main__":
-    exp = Experiment(model_names[0], model_batch_sizes[model_names[0]])
+    model_idx = int(sys.argv[1])
+    exp = Experiment(model_names[model_idx], model_batch_sizes[model_names[model_idx]])
     exp.init_opt_states()
     compiled_fn = compile(exp.train_step, exp.graph_transformation)
     compiled_fn(exp.model, exp.optimizer, exp.example_inputs)
