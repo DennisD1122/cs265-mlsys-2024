@@ -96,8 +96,8 @@ def activation_checkpointing(graph_profiler: GraphProfiler) -> fx.GraphModule:
             inputs=nodes_required_to_recompute,
             outputs=node_to_recompute,
         )
-        print("Extracted recomputation sub-graph: ")
-        recompute_subgraph.print_tabular()
+        # print("Extracted recomputation sub-graph: ")
+        # recompute_subgraph.print_tabular()
 
         # Insert the nodes of the new sub-graph in the old graph before the first
         # backward access of the node to be recomputed.

@@ -7,6 +7,7 @@ import torch
 import torch.fx as fx
 from typing import Dict, Any, List, cast
 import tabulate
+import json
 
 # Minimum memory allocated by PyTorch for a tensor, change according to your device type
 _PYTORCH_MIN_ALLOCATE = 512
@@ -73,7 +74,8 @@ class NodeInfo:
 
 class GraphProfiler(fx.Interpreter):
     def __init__(
-        self, module: fx.GraphModule, garbage_collect_values: bool = True
+        self, module: fx.GraphModule, enable_swapping: bool = True,
+        garbage_collect_values: bool = True
     ):
         super().__init__(module, garbage_collect_values)
 
@@ -88,6 +90,8 @@ class GraphProfiler(fx.Interpreter):
         self.param_and_opt_state_memory: int
         self.candidates: List[fx.Node] = []
         self.recomps: List[fx.Node] = []
+        self.total_runtimes: List[float] = []
+        self.enable_swapping = enable_swapping
 
         rank = 0
         for node in self.module.graph.nodes:
@@ -173,9 +177,9 @@ class GraphProfiler(fx.Interpreter):
                     self.node_info[first_backward].first_back_uses.append(node)
                     n_info.first_back_access = first_backward
                     n_info.last_forward_access = last_forward
-                    print(
-                        f"Intermediate Node: {node.name}, Last forward use: {last_forward.name}, First backward use: {first_backward.name}"
-                    )
+                    # print(
+                    #     f"Intermediate Node: {node.name}, Last forward use: {last_forward.name}, First backward use: {first_backward.name}"
+                    # )
 
     def _swap_out_node(self, node: fx.Node) -> None:
         # 1) Get the nodes to be offloaded
@@ -273,11 +277,17 @@ class GraphProfiler(fx.Interpreter):
         enable_io_processing: bool = True,
     ) -> torch.Any:
         self.param_and_opt_state_memory = torch.cuda.memory_allocated()
-        return super().run(
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+        ret = super().run(
             *args,
             initial_env=initial_env,
             enable_io_processing=enable_io_processing,
         )
+        end_event.record()
+        self.total_runtimes.append(start_event.elapsed_time(end_event))
+        return ret
 
     def run_node(self, node: fx.Node) -> Any:
         if node.op == OP.PLACEHOLDER:
@@ -286,7 +296,10 @@ class GraphProfiler(fx.Interpreter):
         # If you are in the backward pass region and one of the feature maps 'x'
         # was swapped out, and if node 'n' will use this feature map 'x' as one
         # of its inputs then you swap 'x' back to the GPU memory here.
-        if self.node_info[node].rank > self.node_info[self.backward_start].rank:
+        if (
+            self.enable_swapping and
+            self.node_info[node].rank > self.node_info[self.backward_start].rank
+        ):
             self._swap_in_node(node)
 
         start_event = torch.cuda.Event(enable_timing=True)
@@ -319,7 +332,10 @@ class GraphProfiler(fx.Interpreter):
         # If you are in the forward pass region and if the current node 'n' is
         # the last user of a feature map 'x', then it should be swapped out to
         # the CPU memory here.
-        if self.node_info[node].rank < self.node_info[self.forward_end].rank:
+        if (
+            self.enable_swapping and
+            self.node_info[node].rank < self.node_info[self.forward_end].rank
+        ):
             self._swap_out_node(node)
 
         return result
@@ -330,7 +346,7 @@ class GraphProfiler(fx.Interpreter):
                 continue
             self.node_info[node].run_time = mean(self.node_runtimes[node])
 
-            if node in self.intermediate_nodes:
+            if self.enable_swapping and node in self.intermediate_nodes:
                 self.node_info[node].swap_time = mean(
                     self.node_swap_times[node]
                 )
@@ -368,8 +384,39 @@ class GraphProfiler(fx.Interpreter):
             node_summaries.append(val_list)
         print(tabulate.tabulate(node_summaries, headers=headers))
 
+    def save_stats(self, filename):
+        node_type_as_str = ['parameter', 'activation', 'gradient', 'other']
+        
+        stats = {}
+        stats['nodes'] = []
+        for i, n in enumerate(self.module.graph.nodes):
+            n_info = self.node_info[n]
+            stats['nodes'].append({
+                'node_name': n.name,
+                'node_type': node_type_as_str[n_info.node_type.value],
+                'runtime': n_info.run_time,
+                'peak_memory': n_info.peak_total_mem,
+                'size': n_info.memory_size
+            })
+            if n.op != OP.PLACEHOLDER:
+                stats['nodes'][i]['param_and_opt_state_memory'] = n_info.mem_stats.param_and_opt_state_memory
+                stats['nodes'][i]['grad_memory'] = n_info.mem_stats.grad_memory
+                stats['nodes'][i]['activation_memory'] = n_info.mem_stats.activation_memory
+                stats['nodes'][i]['other_memory'] = n_info.mem_stats.other_memory
+            if n in self.intermediate_nodes:
+                stats['nodes'][i]['swap_time'] = n_info.swap_time
+            if n_info.node_type == NodeType.ACT:
+                stats['nodes'][i]['last_forward'] = n_info.last_forward_access.name
+                stats['nodes'][i]['first_backward'] = n_info.first_back_access.name
+        
+        stats['max_peak_memory'] = max(n_info.peak_total_mem for n_info in self.node_info.values())
+        stats['iteration_latency'] = sum(self.total_runtimes) / len(self.total_runtimes)
+        
+        with open(filename, 'w') as f:
+            json.dump(stats, f)
+
     def recomputation_policy(self):
-        mem_limit = torch.cuda.get_device_properties(0).total_memory
+        mem_limit = 0.5 * torch.cuda.get_device_properties(0).total_memory
         mem_consumption = max(n_info.peak_total_mem for n_info in self.node_info.values())
         self.candidates_initialization()
         while self.candidates:

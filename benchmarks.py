@@ -87,14 +87,8 @@ class Experiment:
         self.optimizer.zero_grad()
 
     def graph_transformation(self, gm: fx.GraphModule, args: Any) -> fx.GraphModule:
-        print(gm.graph)
         warm_up_iters, profile_iters = 2, 3
         graph_profiler = GraphProfiler(gm)
-
-        if use_activation_checkpointing:
-            gm = activation_checkpointing(graph_profiler)
-            print(gm.graph)
-            graph_profiler = GraphProfiler(gm)
 
         with torch.no_grad():
             for _ in range(warm_up_iters):
@@ -104,7 +98,22 @@ class Experiment:
             for _ in range(profile_iters):
                 graph_profiler.run(*args)
             graph_profiler.aggregate_stats()
-            graph_profiler.print_stats()
+            # graph_profiler.print_stats()
+            graph_profiler.save_stats(f'stats_0_{model_name}_{batch_size}.json')
+
+        gm = activation_checkpointing(graph_profiler)
+        graph_profiler = GraphProfiler(gm, enable_swapping=False)
+
+        with torch.no_grad():
+            for _ in range(warm_up_iters):
+                graph_profiler.run(*args)
+            graph_profiler.reset_stats()
+
+            for _ in range(profile_iters):
+                graph_profiler.run(*args)
+            graph_profiler.aggregate_stats()
+            # graph_profiler.print_stats()
+            graph_profiler.save_stats(f'stats_1_{model_name}_{batch_size}.json')
 
         return gm
 
@@ -114,10 +123,11 @@ class Experiment:
 
 
 if __name__ == "__main__":
-    global use_activation_checkpointing
-    use_activation_checkpointing = bool(int(sys.argv[1]))
-    model_idx = int(sys.argv[2])
-    exp = Experiment(model_names[model_idx], model_batch_sizes[model_names[model_idx]])
+    global model_name, batch_size
+    model_idx = int(sys.argv[1])
+    batch_size = int(sys.argv[2])
+    model_name = actual_model_names[model_idx]
+    exp = Experiment(model_names[model_idx], batch_size)
     exp.init_opt_states()
     compiled_fn = compile(exp.train_step, exp.graph_transformation)
     compiled_fn(exp.model, exp.optimizer, exp.example_inputs)
