@@ -410,13 +410,13 @@ class GraphProfiler(fx.Interpreter):
                 stats['nodes'][i]['first_backward'] = n_info.first_back_access.name
         
         stats['max_peak_memory'] = max(n_info.peak_total_mem for n_info in self.node_info.values())
-        stats['iteration_latency'] = sum(self.total_runtimes) / len(self.total_runtimes)
+        stats['total_runtime'] = sum(self.total_runtimes) / len(self.total_runtimes)
         
         with open(filename, 'w') as f:
             json.dump(stats, f)
 
     def recomputation_policy(self):
-        mem_limit = 0.5 * torch.cuda.get_device_properties(0).total_memory
+        mem_limit = 0.25 * torch.cuda.get_device_properties(0).total_memory
         mem_consumption = max(n_info.peak_total_mem for n_info in self.node_info.values())
         self.candidates_initialization()
         while self.candidates:
@@ -432,11 +432,24 @@ class GraphProfiler(fx.Interpreter):
     def candidates_initialization(self) -> List[fx.Node]:
         for cand in self.intermediate_nodes:
             cand_info = self.node_info[cand]
-            cand_info.recomp_srcs = cand.all_input_nodes
-            cand_info.recomp_time = cand_info.run_time
+            cand_info.recomp_srcs, non_srcs = self.get_recomp_srcs(cand)
+            cand_info.recomp_time = cand_info.run_time + sum(self.node_info[n].run_time for n in non_srcs)
             cand_info.total_recomp_time = cand_info.recomp_time
             cand_info.recompute_ratio = cand_info.memory_size / cand_info.total_recomp_time
             self.candidates.append(cand)
+
+    def get_recomp_srcs(self, node: fx.Node) -> tuple[List[fx.Node], List[fx.Node]]:
+        srcs = []
+        non_srcs = []
+        for input_node in node.all_input_nodes:
+            if input_node.op == OP.PLACEHOLDER or input_node in self.candidates:
+                srcs.append(input_node)
+            else:
+                non_srcs.append(input_node)
+                new_srcs, new_non_srcs = self.get_recomp_srcs(input_node)
+                srcs.extend(new_srcs)
+                non_srcs.extend(new_non_srcs)
+        return srcs, non_srcs
     
     def max_candidate(self) -> fx.Node:
         max_candidate = None
